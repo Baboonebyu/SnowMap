@@ -1,0 +1,33 @@
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secret*
+*token*
+
+# Local and downloaded project data
+/data/
+/datasets/
+/downloads/
+
+# Local databases and data exports
+*.db
+*.sqlite
+*.sqlite3
+*.csv
+*.parquet
+*.feather
+*.jsonl
+
+# Runtime artifacts
+*.log
+__pycache__/
+*.py[cod]
+.DS_Store
+Thumbs.db
