@@ -1,0 +1,10 @@
+[
+  {"name":"observation_date","type":"DATE","mode":"REQUIRED"},
+  {"name":"cell_id","type":"STRING","mode":"REQUIRED"},
+  {"name":"grid_row","type":"INT64","mode":"REQUIRED"},
+  {"name":"grid_col","type":"INT64","mode":"REQUIRED"},
+  {"name":"latitude","type":"FLOAT64","mode":"REQUIRED"},
+  {"name":"longitude","type":"FLOAT64","mode":"REQUIRED"},
+  {"name":"swe_mm","type":"INT64","mode":"NULLABLE"},
+  {"name":"snow_depth_mm","type":"INT64","mode":"NULLABLE"}
+]
