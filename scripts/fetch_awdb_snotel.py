@@ -83,6 +83,7 @@ def fetch(start: date, end: date, output: Path, metadata_output: Path,
     retrieved = datetime.now(timezone.utc).isoformat()
     output.parent.mkdir(parents=True, exist_ok=True)
     count = 0
+    skipped_missing_date = 0
     with output.open("w", newline="", encoding="utf-8") as target:
         writer = csv.DictWriter(target, fieldnames=DAILY_COLUMNS)
         writer.writeheader()
@@ -106,42 +107,62 @@ def fetch(start: date, end: date, output: Path, metadata_output: Path,
                     continue
                 triplet = str(series.get("stationTriplet", ""))
                 station = station_by_triplet.get(triplet, {})
-                for item in series.get("data", []) or []:
-                    if not isinstance(item, dict):
+                for element_result in series.get("data", []) or []:
+                    if not isinstance(element_result, dict):
                         continue
-                    se = item.get("stationElement") or {}
+                    se = element_result.get("stationElement") or {}
                     code = str(se.get("elementCode", ""))
                     if code not in elements:
                         continue
-                    original_value = item.get("originalValue")
-                    if isinstance(original_value, dict):
-                        original_value = original_value.get("value")
-                    value = item.get("value")
-                    raw_date = str(item.get("date", ""))
-                    observation_date = raw_date[:10]
-                    try:
-                        observation_date = date.fromisoformat(observation_date).isoformat()
-                    except ValueError as error:
-                        raise ValueError(f"Unexpected AWDB observation date: {raw_date!r}") from error
-                    writer.writerow({
-                        "observation_date": observation_date, "station_triplet": triplet,
-                        "station_id": station.get("stationId"), "station_name": station.get("name"),
-                        "state": station.get("stateCode", "UT"), "network": station.get("networkCode", "SNTL"),
-                        "station_latitude": station.get("latitude"), "station_longitude": station.get("longitude"),
-                        "station_elevation_ft": station.get("elevation"),
-                        "data_timezone_offset_hours": station.get("dataTimeZone"),
-                        "element_code": code, "element_ordinal": se.get("ordinal"),
-                        "duration": se.get("durationName", "DAILY"), "value": csv_value(value),
-                        "value_mm": millimeters(value, se.get("storedUnitCode")),
-                        "unit": se.get("storedUnitCode"), "original_value": csv_value(original_value),
-                        "original_unit": se.get("originalUnitCode"), "data_source": item.get("dataSource"),
-                        "central_tendency_type": item.get("centralTendencyType"),
-                        "flags_json": json.dumps(item.get("flags", []), separators=(",", ":")),
-                        "observation_timestamp": raw_date, "source_begin_date": se.get("beginDate"),
-                        "source_end_date": se.get("endDate"), "source_url": data_url,
-                        "retrieved_at_utc": retrieved,
-                    })
-                    count += 1
+
+                    # The current AWDB response nests daily observations under
+                    # each station element's "values" list. Keep compatibility
+                    # with responses that provide one observation per data item.
+                    observations = element_result.get("values")
+                    if not isinstance(observations, list):
+                        observations = [element_result]
+                    for item in observations:
+                        if not isinstance(item, dict):
+                            continue
+                        raw_date = str(item.get("date") or "").strip()
+                        if not raw_date:
+                            # Empty placeholders cannot be represented as daily rows.
+                            skipped_missing_date += 1
+                            continue
+                        observation_date = raw_date[:10]
+                        try:
+                            observation_date = date.fromisoformat(observation_date).isoformat()
+                        except ValueError as error:
+                            raise ValueError(f"Unexpected AWDB observation date: {raw_date!r}") from error
+
+                        original_value = item.get("originalValue", item.get("origValue"))
+                        if isinstance(original_value, dict):
+                            original_value = original_value.get("value")
+                        flags = item.get("flags")
+                        if flags is None:
+                            flags = {key: item[key] for key in ("qcFlag", "qaFlag", "origQcFlag")
+                                     if key in item}
+                        writer.writerow({
+                            "observation_date": observation_date, "station_triplet": triplet,
+                            "station_id": station.get("stationId"), "station_name": station.get("name"),
+                            "state": station.get("stateCode", "UT"), "network": station.get("networkCode", "SNTL"),
+                            "station_latitude": station.get("latitude"), "station_longitude": station.get("longitude"),
+                            "station_elevation_ft": station.get("elevation"),
+                            "data_timezone_offset_hours": station.get("dataTimeZone"),
+                            "element_code": code, "element_ordinal": se.get("ordinal"),
+                            "duration": se.get("durationName", "DAILY"), "value": csv_value(item.get("value")),
+                            "value_mm": millimeters(item.get("value"), se.get("storedUnitCode")),
+                            "unit": se.get("storedUnitCode"), "original_value": csv_value(original_value),
+                            "original_unit": se.get("originalUnitCode"), "data_source": item.get("dataSource"),
+                            "central_tendency_type": item.get("centralTendencyType"),
+                            "flags_json": json.dumps(flags, separators=(",", ":")),
+                            "observation_timestamp": raw_date, "source_begin_date": se.get("beginDate"),
+                            "source_end_date": se.get("endDate"), "source_url": data_url,
+                            "retrieved_at_utc": retrieved,
+                        })
+                        count += 1
+    if skipped_missing_date:
+        print(f"Skipped AWDB entries with no observation date: {skipped_missing_date:,}")
     return count
 
 
