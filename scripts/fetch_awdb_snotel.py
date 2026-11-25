@@ -20,12 +20,9 @@ from urllib.request import Request, urlopen
 API_ROOT = "https://wcc.sc.egov.usda.gov/awdbRestApi/services/v1"
 DEFAULT_ELEMENTS = ("WTEQ", "SNWD")
 DAILY_COLUMNS = [
-    "observation_date", "station_triplet", "station_id", "station_name", "state",
-    "network", "station_latitude", "station_longitude", "station_elevation_ft",
-    "data_timezone_offset_hours", "element_code", "element_ordinal", "duration",
-    "value", "value_mm", "unit", "original_value", "original_unit", "data_source",
-    "central_tendency_type", "flags_json", "observation_timestamp",
-    "source_begin_date", "source_end_date", "source_url", "retrieved_at_utc",
+    "observation_date", "station_triplet", "station_id", "station_name",
+    "station_latitude", "station_longitude", "station_elevation_ft",
+    "element_code", "value", "value_mm", "unit", "flags_json", "retrieved_at_utc",
 ]
 
 
@@ -95,10 +92,10 @@ def fetch(start: date, end: date, output: Path, metadata_output: Path,
             params = {
                 "stationTriplets": ",".join(batch), "elements": ",".join(elements),
                 "duration": "DAILY", "beginDate": start.isoformat(), "endDate": end.isoformat(),
-                "returnFlags": "true", "returnOriginalValues": "true",
+                "returnFlags": "true",
                 "returnSuspectData": "true",
             }
-            payload, data_url = request_json("data", params)
+            payload, _ = request_json("data", params)
             if not isinstance(payload, list):
                 raise ValueError("AWDB data response was not a JSON array")
             station_by_triplet = {str(s["stationTriplet"]): s for s in stations}
@@ -135,9 +132,6 @@ def fetch(start: date, end: date, output: Path, metadata_output: Path,
                         except ValueError as error:
                             raise ValueError(f"Unexpected AWDB observation date: {raw_date!r}") from error
 
-                        original_value = item.get("originalValue", item.get("origValue"))
-                        if isinstance(original_value, dict):
-                            original_value = original_value.get("value")
                         flags = item.get("flags")
                         if flags is None:
                             flags = {key: item[key] for key in ("qcFlag", "qaFlag", "origQcFlag")
@@ -145,19 +139,12 @@ def fetch(start: date, end: date, output: Path, metadata_output: Path,
                         writer.writerow({
                             "observation_date": observation_date, "station_triplet": triplet,
                             "station_id": station.get("stationId"), "station_name": station.get("name"),
-                            "state": station.get("stateCode", "UT"), "network": station.get("networkCode", "SNTL"),
                             "station_latitude": station.get("latitude"), "station_longitude": station.get("longitude"),
                             "station_elevation_ft": station.get("elevation"),
-                            "data_timezone_offset_hours": station.get("dataTimeZone"),
-                            "element_code": code, "element_ordinal": se.get("ordinal"),
-                            "duration": se.get("durationName", "DAILY"), "value": csv_value(item.get("value")),
+                            "element_code": code, "value": csv_value(item.get("value")),
                             "value_mm": millimeters(item.get("value"), se.get("storedUnitCode")),
-                            "unit": se.get("storedUnitCode"), "original_value": csv_value(original_value),
-                            "original_unit": se.get("originalUnitCode"), "data_source": item.get("dataSource"),
-                            "central_tendency_type": item.get("centralTendencyType"),
-                            "flags_json": json.dumps(flags, separators=(",", ":")),
-                            "observation_timestamp": raw_date, "source_begin_date": se.get("beginDate"),
-                            "source_end_date": se.get("endDate"), "source_url": data_url,
+                            "unit": se.get("storedUnitCode"),
+                            "flags_json": "" if flags is None else json.dumps(flags, separators=(",", ":")),
                             "retrieved_at_utc": retrieved,
                         })
                         count += 1

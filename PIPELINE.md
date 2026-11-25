@@ -2,31 +2,42 @@
 
 ## SNOTEL backfills
 
-Fetches active Utah SNOTEL stations and daily SWE (`WTEQ`) and snow depth (`SNWD`) for an inclusive date range. The station snapshot is written as JSON and observations are written as one row per station, date, and element.
+Fetches active Utah SNOTEL stations and daily SWE (`WTEQ`) and snow depth (`SNWD`) for an inclusive date range. The station snapshot is written as JSON and source observations are written as one row per station, date, and element.
 
-```powershell
+```bash
 python scripts/fetch_awdb_snotel.py --start 2026-10-01 --end 2026-10-31
 ```
 
-The CSV retains the AWDB value and unit, original value/unit when supplied, station coordinates and elevation, data timezone offset, observation timestamp, data source, flags, element duration, and source/retrieval provenance. `value_mm` is populated when AWDB's stored unit is inches; the original value and unit remain alongside it. Other units keep `value_mm` empty. The station metadata JSON is a snapshot for the same run. Use `--include-inactive` to include inactive stations, or `--elements WTEQ,SNWD,PREC` to request additional AWDB elements.
+The observations CSV contains only the date, station identifiers and location, element code, source value/unit needed for conversion, quality flags, and retrieval time. `value_mm` is populated when AWDB's stored unit is inches. A separate station metadata JSON snapshot is also written but is not loaded into BigQuery. Use `--include-inactive` to include inactive stations. The BigQuery loader accepts the two ERD elements `WTEQ` and `SNWD`; additional elements can be fetched for separate analysis but must be removed or handled separately before loading.
 
 ## BigQuery tables
 
-Create a BigQuery dataset in advance. The schemas under `schemas/` define `snodas_daily` and `snotel_daily`; observations are partitioned by `observation_date`. Natural keys are `(observation_date, cell_id)` and `(observation_date, station_triplet, element_code)`. The loader stages each CSV and uses a `MERGE`, replacing existing rows with fresh source values on repeated runs.
+Create a BigQuery dataset in advance. `schemas/snotel_station.json` and `schemas/snotel_daily.json` define the ERD's two SNOTEL tables. `snotel_station` has one row per station, keyed by `station_triplet`, with station ID, name, coordinates, and elevation. `snotel_daily` has one row per station and date, keyed by `(station_triplet, observation_date)` and partitioned by `observation_date`. Each daily row stores snow depth and SWE rounded to whole millimeters, their quality flags, and the retrieval time. It uses load jobs rather than DML: station metadata loads when the station table is empty and stays unchanged on later runs; pass `--refresh-stations` to replace it. Each run overwrites only daily date partitions present in the CSV, preserving other dates and making overlapping reruns idempotent.
+
+The SNODAS schema defines `snodas_daily`, partitioned by `observation_date`, with natural key `(observation_date, cell_id)`. Its loader stages the CSV and uses a `MERGE`, which requires billing enabled (BigQuery Sandbox does not support DML).
 
 Install the BigQuery client and authenticate with Application Default Credentials (for example, `gcloud auth application-default login` locally). No service-account key belongs in this repository.
 
-```powershell
+```bash
 python -m pip install -r requirements.txt
-python scripts/load_bigquery.py snotel data/processed/snotel_daily_awdb.csv --project YOUR_PROJECT --dataset YOUR_DATASET
+python scripts/load_bigquery.py snotel data/processed/snotel_daily_awdb.csv --project snowmap-515822 --dataset snowmap
 python scripts/load_bigquery.py snodas data/processed/snodas_utah_20261031.csv --project YOUR_PROJECT --dataset YOUR_DATASET
 ```
 
-The destination dataset must already exist. The SNOTEL loader expects the long-form AWDB CSV from `fetch_awdb_snotel.py`. The SNODAS loader expects the existing extractor's eight-column CSV. The loader validates exact CSV headers before submitting a BigQuery job.
+The destination dataset must already exist. The SNOTEL loader expects the long-form AWDB CSV from `fetch_awdb_snotel.py`; its exact source headers are validated before loading. The SNODAS loader expects the existing extractor's eight-column CSV.
+
+To update values or flags for a date range, fetch that range again and load the resulting CSV. For example, to refresh February 2025:
+
+```bash
+python scripts/fetch_awdb_snotel.py --start 2025-02-01 --end 2025-02-28
+python scripts/load_bigquery.py snotel data/processed/snotel_daily_awdb.csv --project snowmap-515822 --dataset snowmap
+```
+
+The loader replaces those daily date partitions, so the same command can be rerun without duplicating rows. Dates outside the requested range remain in the table.
 
 ## Data caveats
 
 - NRCS observations may be provisional and can be revised. Keep the flags and rerun recent date ranges to refresh them.
 - AWDB `dataTimeZone` is a fixed offset from GMT; the returned observation date remains the source's local daily date.
-- The station metadata file is a latest-run snapshot, while the SNOTEL observation table carries station attributes as seen during each fetch.
+- The station metadata file is a latest-run snapshot. The SNOTEL station table carries station attributes from the observations CSV, while each daily row retains its AWDB retrieval provenance.
 - This step does not download SNODAS archive files or schedule jobs. The current SNODAS extractor remains a one-archive command; its output can be loaded using the command above.
