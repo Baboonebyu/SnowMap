@@ -1,0 +1,5 @@
+[
+  {"name":"id","type":"INT64","mode":"REQUIRED"},
+  {"name":"lat","type":"FLOAT64","mode":"REQUIRED"},
+  {"name":"long","type":"FLOAT64","mode":"REQUIRED"}
+]

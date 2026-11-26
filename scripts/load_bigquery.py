@@ -8,17 +8,17 @@ from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 from pathlib import Path
-import uuid
 
 from google.cloud import bigquery
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = {
     "snodas": {
-        "schema": ROOT / "schemas" / "snodas_daily.json",
-        "key": ("observation_date", "cell_id"),
-        "partition": "observation_date",
-        "default_table": "snodas_daily",
+        "source_schema": ROOT / "schemas" / "snodas_source.json",
+        "cell_schema": ROOT / "schemas" / "snodas_cell.json",
+        "data_schema": ROOT / "schemas" / "snodas_data.json",
+        "cell_table": "snodas_cell",
+        "default_table": "snodas_data",
     },
 }
 
@@ -57,9 +57,13 @@ def load_json_rows(client: bigquery.Client, destination: str,
 
 
 def load_snodas_csv(client: bigquery.Client, csv_path: Path,
-                    dataset: str, table_name: str) -> int:
+                    dataset: str, table_name: str,
+                    cell_table: str | None = None,
+                    refresh_cells: bool = False) -> int:
     config = CONFIG["snodas"]
-    schema, columns = read_schema(config["schema"])
+    source_schema, columns = read_schema(config["source_schema"])
+    cell_schema, _ = read_schema(config["cell_schema"])
+    data_schema, _ = read_schema(config["data_schema"])
     with csv_path.open("r", newline="", encoding="utf-8-sig") as stream:
         reader = csv.DictReader(stream)
         missing = set(columns) - set(reader.fieldnames or [])
@@ -70,45 +74,61 @@ def load_snodas_csv(client: bigquery.Client, csv_path: Path,
     if not rows:
         print("CSV contains no observations; nothing loaded")
         return 0
+    cell_rows: dict[int, dict[str, object]] = {}
+    rows_by_date: dict[str, list[dict[str, object]]] = {}
+    seen_daily_keys: set[tuple[str, int]] = set()
     for row_number, row in enumerate(rows, start=2):
-        if not row[config["partition"]]:
+        if not row["observation_date"]:
             raise ValueError(f"CSV row {row_number} has no observation date")
-        date.fromisoformat(row[config["partition"]])
-        if any(not row[key] for key in config["key"]):
-            raise ValueError(f"CSV row {row_number} is missing a natural key field")
-    table_id = f"{client.project}.{dataset}.{table_name}"
-    target = bigquery.Table(table_id, schema=schema)
-    target.time_partitioning = bigquery.TimePartitioning(
+        observation_date = row["observation_date"]
+        date.fromisoformat(observation_date)
+        if any(not row[key] for key in ("cell_id", "grid_row", "grid_col", "latitude", "longitude")):
+            raise ValueError(f"CSV row {row_number} is missing a cell key or coordinate")
+        grid_row, grid_col = int(row["grid_row"]), int(row["grid_col"])
+        if not 0 <= grid_row < 2**31 or not 0 <= grid_col < 2**32:
+            raise ValueError(f"CSV row {row_number} has grid coordinates outside the supported ID range")
+        numeric_cell_id = (grid_row << 32) + grid_col
+        cell = {
+            "id": numeric_cell_id,
+            "lat": float(row["latitude"]),
+            "long": float(row["longitude"]),
+        }
+        previous_cell = cell_rows.setdefault(numeric_cell_id, cell)
+        if previous_cell != cell:
+            raise ValueError(f"CSV row {row_number} has inconsistent metadata for cell {row['cell_id']}")
+        key = (observation_date, numeric_cell_id)
+        if key in seen_daily_keys:
+            raise ValueError(f"CSV row {row_number} duplicates cell {row['cell_id']} on {observation_date}")
+        seen_daily_keys.add(key)
+        rows_by_date.setdefault(observation_date, []).append({
+            "cell_id": numeric_cell_id,
+            "date": observation_date,
+            "snow_depth": int(row["snow_depth_mm"]) if row["snow_depth_mm"] else None,
+            "swe": int(row["swe_mm"]) if row["swe_mm"] else None,
+        })
+    table_name = table_name or config["default_table"]
+    cell_table = cell_table or config["cell_table"]
+    cell_id = f"{client.project}.{dataset}.{cell_table}"
+    data_id = f"{client.project}.{dataset}.{table_name}"
+    cell_target = bigquery.Table(cell_id, schema=cell_schema)
+    data_target = bigquery.Table(data_id, schema=data_schema)
+    data_target.time_partitioning = bigquery.TimePartitioning(
         type_=bigquery.TimePartitioningType.DAY,
-        field=config["partition"],
+        field="date",
     )
-    client.create_table(target, exists_ok=True)
-    stage_id = f"{client.project}.{dataset}._snowmap_stage_{uuid.uuid4().hex}"
-    load_config = bigquery.LoadJobConfig(
-        schema=schema,
-        source_format=bigquery.SourceFormat.CSV,
-        skip_leading_rows=1,
-        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-        allow_quoted_newlines=True,
-    )
-    try:
-        with csv_path.open("rb") as source_file:
-            client.load_table_from_file(source_file, stage_id, job_config=load_config).result()
-        on_clause = " AND ".join(f"T.`{field}` = S.`{field}`" for field in config["key"])
-        update_columns = [field for field in columns if field not in config["key"]]
-        update_clause = ", ".join(f"`{field}` = S.`{field}`" for field in update_columns)
-        insert_columns = ", ".join(f"`{field}`" for field in columns)
-        insert_values = ", ".join(f"S.`{field}`" for field in columns)
-        sql = f"""
-            MERGE `{table_id}` T
-            USING `{stage_id}` S
-              ON {on_clause}
-            WHEN MATCHED THEN UPDATE SET {update_clause}
-            WHEN NOT MATCHED THEN INSERT ({insert_columns}) VALUES ({insert_values})
-        """
-        client.query(sql).result()
-    finally:
-        client.delete_table(stage_id, not_found_ok=True)
+    client.create_table(cell_target, exists_ok=True)
+    client.create_table(data_target, exists_ok=True)
+    current_cells = client.get_table(cell_id)
+    if refresh_cells or current_cells.num_rows == 0:
+        load_json_rows(client, cell_id, cell_schema, list(cell_rows.values()),
+                       bigquery.WriteDisposition.WRITE_TRUNCATE)
+    else:
+        print(f"Cell table already has {current_cells.num_rows:,} rows; leaving it unchanged")
+
+    for observation_date, daily_rows in sorted(rows_by_date.items()):
+        partition_id = observation_date.replace("-", "")
+        load_json_rows(client, f"{data_id}${partition_id}", data_schema,
+                       daily_rows, bigquery.WriteDisposition.WRITE_TRUNCATE)
     return len(rows)
 
 
@@ -249,7 +269,10 @@ def main() -> None:
     parser.add_argument("csv", type=Path)
     parser.add_argument("--project", required=True, help="BigQuery project ID; auth uses Application Default Credentials")
     parser.add_argument("--dataset", required=True, help="Existing BigQuery dataset ID")
-    parser.add_argument("--table", help="Destination table name (SNODAS daily table only)")
+    parser.add_argument("--table", help="SNODAS daily data table name")
+    parser.add_argument("--cell-table", default="snodas_cell", help="SNODAS cell metadata table")
+    parser.add_argument("--refresh-cells", action="store_true",
+                        help="Replace the cell metadata snapshot, even when the table already has rows")
     parser.add_argument("--station-table", default="snotel_station", help="SNOTEL station metadata table")
     parser.add_argument("--daily-table", default="snotel_daily", help="SNOTEL station/date observations table")
     parser.add_argument("--refresh-stations", action="store_true",
@@ -264,8 +287,10 @@ def main() -> None:
         print(f"Station metadata table: {args.project}.{args.dataset}.{args.station_table}")
     else:
         table_name = args.table or CONFIG[args.source]["default_table"]
-        count = load_snodas_csv(client, args.csv, args.dataset, table_name)
-        print(f"Merged {count:,} rows into {args.project}.{args.dataset}.{table_name}")
+        count = load_snodas_csv(client, args.csv, args.dataset, table_name,
+                                args.cell_table, args.refresh_cells)
+        print(f"Loaded {count:,} cell-date rows into {args.project}.{args.dataset}.{table_name}")
+        print(f"Cell metadata table: {args.project}.{args.dataset}.{args.cell_table}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+[
+  {"name":"cell_id","type":"INT64","mode":"REQUIRED"},
+  {"name":"date","type":"DATE","mode":"REQUIRED"},
+  {"name":"snow_depth","type":"INT64","mode":"NULLABLE"},
+  {"name":"swe","type":"INT64","mode":"NULLABLE"}
+]
