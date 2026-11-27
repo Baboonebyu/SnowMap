@@ -26,6 +26,16 @@ python scripts/load_bigquery.py snodas data/processed/snodas_utah_20261031.csv -
 
 The destination dataset must already exist. The SNOTEL loader expects the long-form AWDB CSV from `fetch_awdb_snotel.py`; its exact source headers are validated before loading. The SNODAS loader expects the existing extractor's eight-column CSV and creates or updates `snodas_cell` and `snodas_data`.
 
+### SNODAS date-range backfill
+
+`scripts/backfill_snodas.py` downloads each daily unmasked archive from the NSIDC HTTPS archive, extracts Utah cells, and loads the date partition into BigQuery. The dataset and project default to `snowmap` and `snowmap-515822`; override them when needed. The default boundary file is `data/raw/cb_2025_us_state_500k.zip`.
+
+```bash
+python scripts/backfill_snodas.py --start 2025-10-01 --end 2026-06-30 --workers 2
+```
+
+The date bounds are inclusive. A CSV manifest at `data/processed/snodas_backfill_manifest.csv` records loaded dates and source dates with no archive. After an interruption, rerun with `--resume` to skip dates already marked loaded. Each daily partition is replaced safely, so reruns are idempotent. Two dates run concurrently by default; adjust with `--workers`. Successfully loaded temporary CSVs and newly downloaded archives are removed by default; use `--keep-csv` or `--keep-archives` to retain them. Existing cached archives are reused.
+
 To update values or flags for a date range, fetch that range again and load the resulting CSV. For example, to refresh February 2025:
 
 ```bash
